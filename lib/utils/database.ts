@@ -42,6 +42,8 @@ export interface StageRecord {
   id: string; // Primary key
   name: string;
   description?: string;
+  erpLessonId?: number;
+  erpTrainingCourseId?: number;
   createdAt: number; // timestamp
   updatedAt: number; // timestamp
   languageDirective?: string;

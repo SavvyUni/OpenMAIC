@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, Suspense, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Sparkles, AlertCircle, AlertTriangle, ArrowLeft, Bot } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -24,6 +24,7 @@ import {
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { db } from '@/lib/utils/database';
 import { MAX_PDF_CONTENT_CHARS, MAX_VISION_IMAGES } from '@/lib/constants/generation';
+import { persistClassroomToServer } from '@/lib/utils/classroom-persistence';
 import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
 import { nanoid } from 'nanoid';
 import type { Stage } from '@/lib/types/stage';
@@ -38,6 +39,7 @@ const OUTLINE_REVIEW_AUTO_CONTINUE_MS = 2500;
 
 function GenerationPreviewContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { t } = useI18n();
   const hasStartedRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -95,6 +97,15 @@ function GenerationPreviewContent() {
     }
   };
 
+  const erpLessonIdFromUrl = Number(searchParams.get('lesson_id'));
+  const normalizedErpLessonIdFromUrl = Number.isInteger(erpLessonIdFromUrl)
+    ? erpLessonIdFromUrl
+    : undefined;
+  const erpTrainingCourseIdFromUrl = Number(searchParams.get('training_course_id'));
+  const normalizedErpTrainingCourseIdFromUrl = Number.isInteger(erpTrainingCourseIdFromUrl)
+    ? erpTrainingCourseIdFromUrl
+    : undefined;
+
   const waitForOutlineReviewChoice = (
     outlines: SceneOutline[],
     shouldReview: boolean,
@@ -134,6 +145,18 @@ function GenerationPreviewContent() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as GenerationSessionState;
+        if (
+          parsed.erpLessonId === undefined &&
+          normalizedErpLessonIdFromUrl !== undefined
+        ) {
+          parsed.erpLessonId = normalizedErpLessonIdFromUrl;
+        }
+        if (
+          parsed.erpTrainingCourseId === undefined &&
+          normalizedErpTrainingCourseIdFromUrl !== undefined
+        ) {
+          parsed.erpTrainingCourseId = normalizedErpTrainingCourseIdFromUrl;
+        }
         if (!parsed.previewPhase) {
           parsed.previewPhase = parsed.sceneOutlines?.length ? 'outline-ready' : 'preparing';
         }
@@ -144,12 +167,13 @@ function GenerationPreviewContent() {
           outlineReviewIntentRef.current = true;
         }
         setSession(parsed);
+        sessionStorage.setItem('generationSession', JSON.stringify(parsed));
       } catch (e) {
         log.error('Failed to parse generation session:', e);
       }
     }
     setSessionLoaded(true);
-  }, []);
+  }, [normalizedErpLessonIdFromUrl, normalizedErpTrainingCourseIdFromUrl]);
 
   // Abort all in-flight requests on unmount
   useEffect(() => {
@@ -446,6 +470,9 @@ function GenerationPreviewContent() {
         id: stageId,
         name: extractTopicFromRequirement(currentSession.requirements.requirement),
         description: '',
+        erpLessonId: currentSession.erpLessonId ?? normalizedErpLessonIdFromUrl,
+        erpTrainingCourseId:
+          currentSession.erpTrainingCourseId ?? normalizedErpTrainingCourseIdFromUrl,
         style: 'professional',
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -959,7 +986,24 @@ function GenerationPreviewContent() {
 
       sessionStorage.removeItem('generationSession');
       await store.saveToStorage();
-      router.push(`/classroom/${stage.id}`);
+      const persistResult = await persistClassroomToServer(stage, useStageStore.getState().scenes);
+      if (!persistResult.success) {
+        throw new Error(persistResult.error || 'Failed to persist classroom');
+      }
+      const classroomParams = new URLSearchParams();
+      const targetErpLessonId = currentSession.erpLessonId ?? normalizedErpLessonIdFromUrl;
+      const targetErpTrainingCourseId =
+        currentSession.erpTrainingCourseId ?? normalizedErpTrainingCourseIdFromUrl;
+      if (targetErpLessonId !== undefined) {
+        classroomParams.set('lesson_id', String(targetErpLessonId));
+      }
+      if (targetErpTrainingCourseId !== undefined) {
+        classroomParams.set('training_course_id', String(targetErpTrainingCourseId));
+      }
+      const classroomUrl = classroomParams.toString()
+        ? `/classroom/${stage.id}?${classroomParams.toString()}`
+        : `/classroom/${stage.id}`;
+      router.push(classroomUrl);
     } catch (err) {
       setIsOutlineStreaming(false);
       // AbortError is expected when navigating away — don't show as error

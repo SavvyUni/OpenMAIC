@@ -5,26 +5,41 @@ import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { loadImageMapping } from '@/lib/utils/image-storage';
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useSceneGenerator } from '@/lib/hooks/use-scene-generator';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { useWhiteboardHistoryStore } from '@/lib/store/whiteboard-history';
 import { createLogger } from '@/lib/logger';
 import { MediaStageProvider } from '@/lib/contexts/media-stage-context';
 import { generateMediaForOutlines } from '@/lib/media/media-orchestrator';
+import { persistClassroomToServer } from '@/lib/utils/classroom-persistence';
+import { toast } from 'sonner';
 
 const log = createLogger('Classroom');
 
 export default function ClassroomDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const classroomId = params?.id as string;
+  const erpLessonId = Number(searchParams.get('lesson_id'));
+  const normalizedErpLessonId = Number.isInteger(erpLessonId)
+    ? erpLessonId
+    : undefined;
+  const erpTrainingCourseId = Number(searchParams.get('training_course_id'));
+  const normalizedErpTrainingCourseId = Number.isInteger(erpTrainingCourseId)
+    ? erpTrainingCourseId
+    : undefined;
 
-  const { loadFromStorage } = useStageStore();
+  const loadFromStorage = useStageStore.use.loadFromStorage();
+  const stage = useStageStore.use.stage();
+  const scenes = useStageStore.use.scenes();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const generationStartedRef = useRef(false);
+  const lastPersistedSnapshotRef = useRef<string | null>(null);
+  const lastPersistErrorRef = useRef<string | null>(null);
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
     onComplete: () => {
@@ -110,6 +125,7 @@ export default function ClassroomDetailPage() {
     setLoading(true);
     setError(null);
     generationStartedRef.current = false;
+    lastPersistedSnapshotRef.current = null;
 
     // Clear previous classroom's media tasks to prevent cross-classroom contamination.
     // Placeholder IDs (gen_img_1, gen_vid_1) are NOT globally unique across stages,
@@ -177,6 +193,69 @@ export default function ClassroomDetailPage() {
     }
   }, [loading, error, generateRemaining]);
 
+  useEffect(() => {
+    if (loading || error || !stage || scenes.length === 0) return;
+
+    const snapshot = JSON.stringify({
+      stageId: stage.id,
+      stageUpdatedAt: stage.updatedAt,
+      sceneIds: scenes.map((scene) => scene.id),
+      sceneUpdatedAt: scenes.map((scene) => scene.updatedAt ?? null),
+    });
+
+    if (snapshot === lastPersistedSnapshotRef.current) return;
+    lastPersistedSnapshotRef.current = snapshot;
+
+    void persistClassroomToServer(stage, scenes).then((result) => {
+      if (result.success) {
+        lastPersistErrorRef.current = null;
+        return;
+      }
+
+      const nextError = result.error || 'Failed to persist classroom';
+      log.warn(`[Classroom] Failed to persist classroom [stageId=${stage.id}]`, nextError);
+
+      if (lastPersistErrorRef.current === nextError) {
+        return;
+      }
+
+      lastPersistErrorRef.current = nextError;
+      toast.error(nextError);
+    });
+  }, [loading, error, stage, scenes]);
+
+  useEffect(() => {
+    if (!stage || normalizedErpLessonId === undefined) return;
+    if (stage.erpLessonId === normalizedErpLessonId) return;
+
+    useStageStore.setState((state) => ({
+      stage: state.stage
+        ? {
+            ...state.stage,
+            erpLessonId: normalizedErpLessonId,
+            updatedAt: Date.now(),
+          }
+        : state.stage,
+    }));
+    void useStageStore.getState().saveToStorage();
+  }, [stage, normalizedErpLessonId]);
+
+  useEffect(() => {
+    if (!stage || normalizedErpTrainingCourseId === undefined) return;
+    if (stage.erpTrainingCourseId === normalizedErpTrainingCourseId) return;
+
+    useStageStore.setState((state) => ({
+      stage: state.stage
+        ? {
+            ...state.stage,
+            erpTrainingCourseId: normalizedErpTrainingCourseId,
+            updatedAt: Date.now(),
+          }
+        : state.stage,
+    }));
+    void useStageStore.getState().saveToStorage();
+  }, [stage, normalizedErpTrainingCourseId]);
+  
   return (
     <ThemeProvider>
       <MediaStageProvider value={classroomId}>

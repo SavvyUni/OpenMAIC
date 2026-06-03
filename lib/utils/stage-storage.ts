@@ -44,6 +44,8 @@ export async function saveStageData(stageId: string, data: StageStoreData): Prom
       id: stageId,
       name: data.stage.name || 'Untitled Stage',
       description: data.stage.description,
+      erpLessonId: data.stage.erpLessonId,
+      erpTrainingCourseId: data.stage.erpTrainingCourseId,
       createdAt: data.stage.createdAt || now,
       updatedAt: now,
       languageDirective: data.stage.languageDirective,
