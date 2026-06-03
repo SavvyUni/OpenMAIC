@@ -25,6 +25,8 @@ export interface Stage {
   id: string;
   name: string;
   description?: string;
+  erpLessonId?: number;
+  erpTrainingCourseId?: number;
   createdAt: number;
   updatedAt: number;
   // Stage metadata

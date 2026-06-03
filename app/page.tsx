@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ArrowUp,
@@ -56,6 +56,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useDraftCache } from '@/lib/hooks/use-draft-cache';
 import { SpeechButton } from '@/components/audio/speech-button';
 import { useImportClassroom } from '@/lib/import/use-import-classroom';
+import { renameClassroomOnServer } from '@/lib/utils/classroom-persistence';
 
 const log = createLogger('Home');
 
@@ -81,6 +82,7 @@ function HomePage() {
   const { t } = useI18n();
   const { theme, setTheme } = useTheme();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [form, setForm] = useState<FormState>(initialFormState);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<
@@ -232,8 +234,14 @@ function HomePage() {
 
   const handleRename = async (id: string, newName: string) => {
     try {
+      const classroom = classrooms.find((item) => item.id === id);
       await renameStage(id, newName);
-      setClassrooms((prev) => prev.map((c) => (c.id === id ? { ...c, name: newName } : c)));
+      await loadClassrooms();
+      void renameClassroomOnServer(id, newName, classroom?.description).then((result) => {
+        if (!result.success) {
+          log.warn(`Rename sync skipped or failed [stageId=${id}]`, result.error);
+        }
+      });
     } catch (err) {
       log.error('Failed to rename classroom:', err);
       toast.error(t('classroom.renameFailed'));
@@ -305,8 +313,16 @@ function HomePage() {
         }
       }
 
+      const erpLessonId = Number(searchParams.get('lesson_id'));
+      const erpTrainingCourseId = Number(searchParams.get('training_course_id'));
       const sessionState = {
         sessionId: nanoid(),
+        erpLessonId: Number.isInteger(erpLessonId)
+          ? erpLessonId
+          : undefined,
+        erpTrainingCourseId: Number.isInteger(erpTrainingCourseId)
+          ? erpTrainingCourseId
+          : undefined,
         requirements,
         pdfText: '',
         pdfImages: [],
@@ -320,7 +336,18 @@ function HomePage() {
       };
       sessionStorage.setItem('generationSession', JSON.stringify(sessionState));
 
-      router.push('/generation-preview');
+      const generationPreviewParams = new URLSearchParams();
+      if (Number.isInteger(erpLessonId)) {
+        generationPreviewParams.set('lesson_id', String(erpLessonId));
+      }
+      if (Number.isInteger(erpTrainingCourseId)) {
+        generationPreviewParams.set('training_course_id', String(erpTrainingCourseId));
+      }
+
+      const generationPreviewUrl = generationPreviewParams.toString()
+        ? `/generation-preview?${generationPreviewParams.toString()}`
+        : '/generation-preview';
+      router.push(generationPreviewUrl);
     } catch (err) {
       log.error('Error preparing generation:', err);
       setError(err instanceof Error ? err.message : t('upload.generateFailed'));
@@ -785,7 +812,17 @@ function HomePage() {
                           confirmingDelete={pendingDeleteId === classroom.id}
                           onConfirmDelete={() => confirmDelete(classroom.id)}
                           onCancelDelete={() => setPendingDeleteId(null)}
-                          onClick={() => router.push(`/classroom/${classroom.id}`)}
+                          onClick={() => {
+                            const lessonId = Number(searchParams.get('lesson_id'));
+                            const courseId = Number(searchParams.get('training_course_id'));
+                            const params = new URLSearchParams();
+                            if (Number.isInteger(lessonId)) params.set('lesson_id', String(lessonId));
+                            if (Number.isInteger(courseId)) params.set('training_course_id', String(courseId));
+                            const qs = params.toString();
+                            router.push(
+                              qs ? `/classroom/${classroom.id}?${qs}` : `/classroom/${classroom.id}`,
+                            );
+                          }}
                         />
                       </motion.div>
                     ))}

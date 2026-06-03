@@ -10,6 +10,8 @@ import type {
 // Session state stored in sessionStorage
 export interface GenerationSessionState {
   sessionId: string;
+  erpLessonId?: number;
+  erpTrainingCourseId?: number;
   requirements: UserRequirements;
   pdfText: string;
   pdfImages?: PdfImage[];
