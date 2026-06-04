@@ -69,8 +69,6 @@ next-env.d.ts
 /data
 /logs
 
-# docs
-/docs
 # Eval results
 eval/whiteboard-layout/results/
 eval/outline-language/results/
