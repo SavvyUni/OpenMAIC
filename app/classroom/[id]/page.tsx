@@ -22,9 +22,7 @@ export default function ClassroomDetailPage() {
   const searchParams = useSearchParams();
   const classroomId = params?.id as string;
   const erpLessonId = Number(searchParams.get('lesson_id'));
-  const normalizedErpLessonId = Number.isInteger(erpLessonId)
-    ? erpLessonId
-    : undefined;
+  const normalizedErpLessonId = Number.isInteger(erpLessonId) ? erpLessonId : undefined;
   const erpTrainingCourseId = Number(searchParams.get('training_course_id'));
   const normalizedErpTrainingCourseId = Number.isInteger(erpTrainingCourseId)
     ? erpTrainingCourseId
@@ -33,6 +31,9 @@ export default function ClassroomDetailPage() {
   const loadFromStorage = useStageStore.use.loadFromStorage();
   const stage = useStageStore.use.stage();
   const scenes = useStageStore.use.scenes();
+  const generatingOutlines = useStageStore.use.generatingOutlines();
+  const generationStatus = useStageStore.use.generationStatus();
+  const mediaTasks = useMediaGenerationStore((state) => state.tasks);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -196,6 +197,17 @@ export default function ClassroomDetailPage() {
   useEffect(() => {
     if (loading || error || !stage || scenes.length === 0) return;
 
+    const hasPendingSceneGeneration =
+      generatingOutlines.length > 0 || generationStatus === 'generating';
+    const hasPendingMediaGeneration = Object.values(mediaTasks).some(
+      (task) =>
+        task.stageId === classroomId && (task.status === 'pending' || task.status === 'generating'),
+    );
+
+    if (hasPendingSceneGeneration || hasPendingMediaGeneration) {
+      return;
+    }
+
     const snapshot = JSON.stringify({
       stageId: stage.id,
       stageUpdatedAt: stage.updatedAt,
@@ -222,7 +234,16 @@ export default function ClassroomDetailPage() {
       lastPersistErrorRef.current = nextError;
       toast.error(nextError);
     });
-  }, [loading, error, stage, scenes]);
+  }, [
+    classroomId,
+    error,
+    generationStatus,
+    generatingOutlines.length,
+    loading,
+    mediaTasks,
+    scenes,
+    stage,
+  ]);
 
   useEffect(() => {
     if (!stage || normalizedErpLessonId === undefined) return;
@@ -255,7 +276,7 @@ export default function ClassroomDetailPage() {
     }));
     void useStageStore.getState().saveToStorage();
   }, [stage, normalizedErpTrainingCourseId]);
-  
+
   return (
     <ThemeProvider>
       <MediaStageProvider value={classroomId}>

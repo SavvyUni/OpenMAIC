@@ -71,7 +71,10 @@ export function isValidClassroomId(id: string): boolean {
 }
 
 function sanitizePathSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  return value
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
 }
 
 function isErpManagedStage(stage: Stage | null | undefined) {
@@ -322,6 +325,7 @@ async function syncCourseToTrainingService(
 }
 
 async function syncCourseMetadataToTrainingService(course: CourseSyncInput) {
+  const shouldIncludeFullPayload = !(course.manifestBucket && course.manifestKey);
   const body = JSON.stringify({
     lessonId: course.lessonId,
     ...(course.trainingCourseId ? { trainingCourseId: course.trainingCourseId } : {}),
@@ -331,8 +335,8 @@ async function syncCourseMetadataToTrainingService(course: CourseSyncInput) {
     ...(course.manifestBucket ? { manifestBucket: course.manifestBucket } : {}),
     ...(course.manifestKey ? { manifestKey: course.manifestKey } : {}),
     ...(course.createdBy ? { createdBy: course.createdBy } : {}),
-    stage: course.stage,
-    ...(course.scenes ? { scenes: course.scenes } : {}),
+    ...(shouldIncludeFullPayload ? { stage: course.stage } : {}),
+    ...(shouldIncludeFullPayload && course.scenes ? { scenes: course.scenes } : {}),
   });
 
   const response = await proxyFetch(buildErpApiUrl(ERP_LESSON_OPENMAIC_SYNC_PATH), {

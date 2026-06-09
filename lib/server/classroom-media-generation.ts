@@ -2,13 +2,10 @@
  * Server-side media and TTS generation for classrooms.
  *
  * Generates image/video files and TTS audio for a classroom,
- * writes them to disk, and returns serving URL mappings.
+ * uploads them to ERP OSS, and returns URL mappings.
  */
 
-import { promises as fs } from 'fs';
-import path from 'path';
 import { createLogger } from '@/lib/logger';
-import { CLASSROOMS_DIR } from '@/lib/server/classroom-storage';
 import { generateImage } from '@/lib/media/image-providers';
 import { generateVideo, normalizeVideoOptions } from '@/lib/media/video-providers';
 import { generateTTS } from '@/lib/audio/tts-providers';
@@ -27,9 +24,11 @@ import {
   resolveTTSApiKey,
   resolveTTSBaseUrl,
 } from '@/lib/server/provider-config';
+import { buildErpApiHeaders, buildErpApiUrl } from '@/lib/server/erp-api';
 import type { SceneOutline } from '@/lib/types/generation';
 import type { Scene } from '@/lib/types/stage';
 import type { SpeechAction } from '@/lib/types/action';
+import type { Stage } from '@/lib/types/stage';
 import type { ImageProviderId } from '@/lib/media/types';
 import type { VideoProviderId } from '@/lib/media/types';
 import type { TTSProviderId } from '@/lib/audio/types';
@@ -42,12 +41,9 @@ const log = createLogger('ClassroomMedia');
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function ensureDir(dir: string) {
-  await fs.mkdir(dir, { recursive: true });
-}
-
 const DOWNLOAD_TIMEOUT_MS = 120_000; // 2 minutes
 const DOWNLOAD_MAX_SIZE = 100 * 1024 * 1024; // 100 MB
+const ERP_UPLOAD_BUCKET = 'savvyuni-intl-erp';
 
 async function downloadToBuffer(url: string): Promise<Buffer> {
   const resp = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
@@ -59,8 +55,105 @@ async function downloadToBuffer(url: string): Promise<Buffer> {
   return Buffer.from(await resp.arrayBuffer());
 }
 
-function mediaServingUrl(baseUrl: string, classroomId: string, subPath: string): string {
-  return `${baseUrl}/api/classroom-media/${classroomId}/${subPath}`;
+function sanitizePathSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+
+function extensionFromMimeType(mimeType?: string, fallback = 'bin') {
+  const normalized = mimeType?.toLowerCase();
+  switch (normalized) {
+    case 'audio/mpeg':
+      return 'mp3';
+    case 'audio/wav':
+    case 'audio/x-wav':
+      return 'wav';
+    case 'audio/mp4':
+    case 'audio/aac':
+      return 'm4a';
+    case 'audio/ogg':
+      return 'ogg';
+    case 'image/jpeg':
+      return 'jpg';
+    case 'image/png':
+      return 'png';
+    case 'image/webp':
+      return 'webp';
+    case 'video/mp4':
+      return 'mp4';
+    case 'video/webm':
+      return 'webm';
+    default:
+      return fallback;
+  }
+}
+
+function getTrainingCourseScope(stage: Stage) {
+  return stage.erpLessonId ? `lesson-${stage.erpLessonId}` : `stage-${stage.id}`;
+}
+
+function buildAssetKey(options: {
+  stage: Stage;
+  kind: 'audio' | 'image' | 'video';
+  assetId: string;
+  mimeType?: string;
+}) {
+  const { stage, kind, assetId, mimeType } = options;
+  const scope = sanitizePathSegment(getTrainingCourseScope(stage));
+  const stageId = sanitizePathSegment(stage.id);
+  const safeAssetId = sanitizePathSegment(assetId);
+  const ext = extensionFromMimeType(
+    mimeType,
+    kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3',
+  );
+
+  return `openmaic/${scope}/${stageId}/${kind}/${safeAssetId}.${ext}`;
+}
+
+async function uploadGeneratedAsset(options: {
+  stage: Stage;
+  kind: 'audio' | 'image' | 'video';
+  assetId: string;
+  mimeType?: string;
+  bytes: Buffer;
+}): Promise<string> {
+  const key = buildAssetKey({
+    stage: options.stage,
+    kind: options.kind,
+    assetId: options.assetId,
+    mimeType: options.mimeType,
+  });
+  const ext = extensionFromMimeType(
+    options.mimeType,
+    options.kind === 'image' ? 'png' : options.kind === 'video' ? 'mp4' : 'mp3',
+  );
+  const formData = new FormData();
+
+  formData.set('bucket', ERP_UPLOAD_BUCKET);
+  formData.set('key', key);
+  formData.set(
+    'file',
+    new Blob([options.bytes], { type: options.mimeType || 'application/octet-stream' }),
+    `${sanitizePathSegment(options.assetId)}.${ext}`,
+  );
+
+  const response = await fetch(buildErpApiUrl('/api/upload/file'), {
+    method: 'POST',
+    headers: buildErpApiHeaders(),
+    body: formData,
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message || data?.error || `ERP upload failed with HTTP ${response.status}`,
+    );
+  }
+
+  if (!data?.url) {
+    throw new Error('ERP upload API returned an incomplete asset payload');
+  }
+
+  return data.url;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,12 +162,8 @@ function mediaServingUrl(baseUrl: string, classroomId: string, subPath: string):
 
 export async function generateMediaForClassroom(
   outlines: SceneOutline[],
-  classroomId: string,
-  baseUrl: string,
+  stage: Stage,
 ): Promise<Record<string, string>> {
-  const mediaDir = path.join(CLASSROOMS_DIR, classroomId, 'media');
-  await ensureDir(mediaDir);
-
   // Collect all media generation requests from outlines
   const requests = outlines.flatMap((o) => o.mediaGenerations ?? []);
   if (requests.length === 0) return {};
@@ -121,10 +210,14 @@ export async function generateMediaForClassroom(
           continue;
         }
 
-        const filename = `${req.elementId}.${ext}`;
-        await fs.writeFile(path.join(mediaDir, filename), buf);
-        mediaMap[req.elementId] = mediaServingUrl(baseUrl, classroomId, `media/${filename}`);
-        log.info(`Generated image: ${filename}`);
+        mediaMap[req.elementId] = await uploadGeneratedAsset({
+          stage,
+          kind: 'image',
+          assetId: req.elementId,
+          mimeType: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`,
+          bytes: buf,
+        });
+        log.info(`Generated image and uploaded to ERP OSS: ${req.elementId}.${ext}`);
       } catch (err) {
         log.warn(`Image generation failed for ${req.elementId}:`, err);
       }
@@ -154,10 +247,14 @@ export async function generateMediaForClassroom(
         );
 
         const buf = await downloadToBuffer(result.url);
-        const filename = `${req.elementId}.mp4`;
-        await fs.writeFile(path.join(mediaDir, filename), buf);
-        mediaMap[req.elementId] = mediaServingUrl(baseUrl, classroomId, `media/${filename}`);
-        log.info(`Generated video: ${filename}`);
+        mediaMap[req.elementId] = await uploadGeneratedAsset({
+          stage,
+          kind: 'video',
+          assetId: req.elementId,
+          mimeType: 'video/mp4',
+          bytes: buf,
+        });
+        log.info(`Generated video and uploaded to ERP OSS: ${req.elementId}.mp4`);
       } catch (err) {
         log.warn(`Video generation failed for ${req.elementId}:`, err);
       }
@@ -215,12 +312,8 @@ export function replaceMediaPlaceholders(scenes: Scene[], mediaMap: Record<strin
 
 export async function generateTTSForClassroom(
   scenes: Scene[],
-  classroomId: string,
-  baseUrl: string,
+  stage: Stage,
 ): Promise<void> {
-  const audioDir = path.join(CLASSROOMS_DIR, classroomId, 'audio');
-  await ensureDir(audioDir);
-
   // Resolve TTS provider (exclude browser-native-tts)
   const ttsProviderIds = Object.keys(getServerTTSProviders()).filter(
     (id) => id !== 'browser-native-tts',
@@ -274,12 +367,15 @@ export async function generateTTSForClassroom(
           speechAction.text,
         );
 
-        const filename = `${audioId}.${result.format || format}`;
-        await fs.writeFile(path.join(audioDir, filename), result.audio);
-
         speechAction.audioId = audioId;
-        speechAction.audioUrl = mediaServingUrl(baseUrl, classroomId, `audio/${filename}`);
-        log.info(`Generated TTS: ${filename} (${result.audio.length} bytes)`);
+        speechAction.audioUrl = await uploadGeneratedAsset({
+          stage,
+          kind: 'audio',
+          assetId: audioId,
+          mimeType: `audio/${result.format || format}`,
+          bytes: result.audio,
+        });
+        log.info(`Generated TTS and uploaded to ERP OSS: ${audioId} (${result.audio.length} bytes)`);
       } catch (err) {
         log.warn(`TTS generation failed for action ${action.id}:`, err);
       }
